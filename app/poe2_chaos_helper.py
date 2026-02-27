@@ -49,6 +49,8 @@ class RuntimeConfig:
     click_delay: float = 0.07
     copy_delay: float = 0.08
     loop_interval: float = 0.12
+    # 新 feature：F9 自动化运行期间持续按住 Shift（更稳定地重复应用混沌石）
+    hold_shift_during_run: bool = True
 
 
 def runtime_base_dir() -> Path:
@@ -457,7 +459,9 @@ class ChaosHelperApp:
             if not parsed:
                 continue
 
-            filtered_ids = [template_id for template_id in parsed.template_ids if template_id in allowed_ids]
+            filtered_ids = [
+                template_id for template_id in parsed.template_ids if template_id in allowed_ids
+            ]
             if not filtered_ids:
                 continue
 
@@ -627,13 +631,9 @@ class ChaosHelperApp:
 
         matched, command_name = any_command_satisfied(result.matched_template_ids, self.commands)
         if matched:
-            self._set_status(
-                f"剪贴板识别 {len(result.matched_template_ids)} 条，命中 {command_name}。"
-            )
+            self._set_status(f"剪贴板识别 {len(result.matched_template_ids)} 条，命中 {command_name}。")
         else:
-            self._set_status(
-                f"剪贴板识别 {len(result.matched_template_ids)} 条，未命中任何命令。"
-            )
+            self._set_status(f"剪贴板识别 {len(result.matched_template_ids)} 条，未命中任何命令。")
 
     def _start_hotkeys(self) -> None:
         self.hotkey_listener = GlobalHotKeys(
@@ -706,59 +706,88 @@ class ChaosHelperApp:
             else:
                 self._set_status("当前没有运行中的自动化。")
 
+    # --- 新增：Shift 保持按住/释放（线程安全） ---
+    def _ensure_shift_down(self) -> None:
+        with self.input_lock:
+            try:
+                self.keyboard.press(Key.shift)
+            except Exception:
+                pass
+
+    def _ensure_shift_up(self) -> None:
+        with self.input_lock:
+            try:
+                self.keyboard.release(Key.shift)
+            except Exception:
+                pass
+
     def _automation_loop(self) -> None:
         item_name = self.run_item_name
         templates = self.run_templates
         commands = self.run_commands
 
-        while not self.automation_stop_event.is_set():
-            self._do_shift_click()
-            if self._wait_or_stop(self.runtime.click_delay):
-                return
+        # Feature：F9 运行期间持续按住 Shift，确保混沌石能稳定重复应用
+        try:
+            if self.runtime.hold_shift_during_run:
+                self._ensure_shift_down()
 
-            self._do_copy_item_text()
-            if self._wait_or_stop(self.runtime.copy_delay):
-                return
-
-            clipboard_text = pyperclip.paste()
-            if not clipboard_text.strip():
-                self._enqueue_status("剪贴板为空，继续重试...")
-                if self._wait_or_stop(self.runtime.loop_interval):
+            while not self.automation_stop_event.is_set():
+                self._do_shift_click()
+                if self._wait_or_stop(self.runtime.click_delay):
                     return
-                continue
 
-            detected_item = detect_item_name_from_clipboard(clipboard_text, self.item_names)
-            if detected_item and detected_item != item_name:
-                self._enqueue_status(
-                    f"检测到当前物品为 {detected_item}，与目标珠宝 {item_name} 不一致，已跳过本轮。"
-                )
-                if self._wait_or_stop(self.runtime.loop_interval):
+                self._do_copy_item_text()
+                if self._wait_or_stop(self.runtime.copy_delay):
                     return
-                continue
 
-            result = match_clipboard_mods(clipboard_text, templates)
-            matched, command_name = any_command_satisfied(result.matched_template_ids, commands)
-            if matched:
-                summary = ",".join(result.matched_template_ids)
-                self.ui_queue.put(
-                    (
-                        "match",
-                        f"命中 {command_name}，已停止。识别词缀: {summary}",
+                clipboard_text = pyperclip.paste()
+                if not clipboard_text.strip():
+                    self._enqueue_status("剪贴板为空，继续重试...")
+                    if self._wait_or_stop(self.runtime.loop_interval):
+                        return
+                    continue
+
+                detected_item = detect_item_name_from_clipboard(clipboard_text, self.item_names)
+                if detected_item and detected_item != item_name:
+                    self._enqueue_status(
+                        f"检测到当前物品为 {detected_item}，与目标珠宝 {item_name} 不一致，已跳过本轮。"
                     )
-                )
-                return
+                    if self._wait_or_stop(self.runtime.loop_interval):
+                        return
+                    continue
 
-            self._enqueue_status(
-                f"未命中命令；当前识别 {len(result.matched_template_ids)} 条词缀，继续洗词缀..."
-            )
-            if self._wait_or_stop(self.runtime.loop_interval):
-                return
+                result = match_clipboard_mods(clipboard_text, templates)
+                matched, command_name = any_command_satisfied(result.matched_template_ids, commands)
+                if matched:
+                    summary = ",".join(result.matched_template_ids)
+                    self.ui_queue.put(
+                        (
+                            "match",
+                            f"命中 {command_name}，已停止。识别词缀: {summary}",
+                        )
+                    )
+                    return
+
+                self._enqueue_status(
+                    f"未命中命令；当前识别 {len(result.matched_template_ids)} 条词缀，继续洗词缀..."
+                )
+                if self._wait_or_stop(self.runtime.loop_interval):
+                    return
+        finally:
+            # 无论命中停止/手动停止/异常退出，都尽力释放 Shift，避免卡键
+            if self.runtime.hold_shift_during_run:
+                self._ensure_shift_up()
 
     def _do_shift_click(self) -> None:
         with self.input_lock:
-            self.keyboard.press(Key.shift)
+            # 如果开启“运行期间按住 Shift”，这里就不再按下/松开 Shift，只负责左键
+            if not self.runtime.hold_shift_during_run:
+                self.keyboard.press(Key.shift)
+
             self.mouse.click(MouseButton.left, 1)
-            self.keyboard.release(Key.shift)
+
+            if not self.runtime.hold_shift_during_run:
+                self.keyboard.release(Key.shift)
 
     def _do_copy_item_text(self) -> None:
         with self.input_lock:

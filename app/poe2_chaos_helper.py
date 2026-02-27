@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import queue
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -51,6 +52,12 @@ class RuntimeConfig:
     loop_interval: float = 0.12
 
 
+def runtime_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
 class ChaosHelperApp:
     def __init__(self, root: Tk, templates_path: Path, variations_path: Path) -> None:
         self.root = root
@@ -70,7 +77,7 @@ class ChaosHelperApp:
 
         self.commands: list[CraftCommand] = []
         self.command_counter = 1
-        self.command_presets_path = Path(__file__).resolve().parent.parent / "command_presets.json"
+        self.command_presets_path = runtime_base_dir() / "command_presets.json"
         self.command_presets: dict[str, dict] = {}
 
         self.run_item_name: str = ""
@@ -739,7 +746,7 @@ class ChaosHelperApp:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="PoE2 珠宝混沌石辅助工具（本地版）")
-    root_dir = Path(__file__).resolve().parent.parent
+    root_dir = runtime_base_dir()
     parser.add_argument(
         "--templates",
         default=str(root_dir / "mod_templates.csv"),

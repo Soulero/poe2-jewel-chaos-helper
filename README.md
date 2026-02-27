@@ -61,3 +61,39 @@ python3 -m app.poe2_chaos_helper \
 - 需要给 Python 进程系统输入权限（macOS 的“辅助功能/输入监控”）。
 - 本工具为本地自动化脚本，请自行确认是否符合游戏服务条款和账号风险。
 - 技术细节与外部资料见 `docs/technical_materials.md`。
+
+## 7. 生成可分享的 Windows 压缩包（exe + 运行文件）
+
+### 方式 A：GitHub 自动构建（推荐）
+
+1. 推送代码到 GitHub。
+2. 打一个版本 tag（示例 `v1.1.0`）并推送：
+
+   ```bash
+   git tag v1.1.0
+   git push origin v1.1.0
+   ```
+
+3. GitHub Actions 会自动执行 `.github/workflows/windows-release.yml`。
+4. 构建完成后可在以下位置下载 ZIP：
+   - Actions 的 artifact
+   - 对应 tag 的 GitHub Release 附件
+
+ZIP 内包含：
+
+- `POE2ChaosHelper.exe`
+- `mod_templates.csv`
+- `mod_variations.csv`
+- `command_presets.json`
+- `README.txt`
+
+### 方式 B：本地 Windows 构建
+
+```bash
+python -m pip install -r requirements.txt pyinstaller
+python scripts/package_windows_release.py --version 1.1.0
+```
+
+构建后产物在：
+
+- `release/poe2-chaos-helper_1.1.0.zip`

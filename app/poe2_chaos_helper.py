@@ -6,7 +6,6 @@ import json
 import queue
 import sys
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import (
@@ -138,7 +137,10 @@ class ChaosHelperApp:
 
         Button(actions, text="重载 CSV", command=self._load_data).pack(side=LEFT, padx=(0, 6))
         Button(actions, text="开始 (F9)", command=self._start_from_ui).pack(side=LEFT, padx=(0, 6))
-        Button(actions, text="停止 (F10)", command=self.stop_automation).pack(side=LEFT, padx=(0, 6))
+        Button(actions, text="手动停止 (F10)", command=self.stop_automation).pack(side=LEFT, padx=(0, 6))
+        Button(actions, text="强制停止 (F11)", command=self.force_stop_automation).pack(
+            side=LEFT, padx=(0, 6)
+        )
         Button(actions, text="测试剪贴板解析", command=self._debug_clipboard).pack(side=LEFT, padx=(0, 6))
 
         body = Frame(self.root)
@@ -243,7 +245,7 @@ class ChaosHelperApp:
             bottom,
             text=(
                 "流程: 先选珠宝类型 -> 选择词缀 -> 添加命令（与命令/数量命令） -> "
-                "游戏内鼠标悬停物品 -> F9 启动。命中任意 1 条命令自动停止。"
+                "游戏内鼠标悬停物品 -> F9 启动 / F10 手动停止 / F11 强制停止。"
             ),
             justify="left",
             anchor="w",
@@ -635,7 +637,11 @@ class ChaosHelperApp:
 
     def _start_hotkeys(self) -> None:
         self.hotkey_listener = GlobalHotKeys(
-            {"<f9>": self._handle_hotkey_start, "<f10>": self._handle_hotkey_stop}
+            {
+                "<f9>": self._handle_hotkey_start,
+                "<f10>": self._handle_hotkey_stop,
+                "<f11>": self._handle_hotkey_force_stop,
+            }
         )
         self.hotkey_listener.start()
 
@@ -644,7 +650,12 @@ class ChaosHelperApp:
         self.root.after(0, self._start_from_ui)
 
     def _handle_hotkey_stop(self) -> None:
+        self.ui_queue.put(("status", "收到 F10，尝试手动停止自动化..."))
         self.root.after(0, self.stop_automation)
+
+    def _handle_hotkey_force_stop(self) -> None:
+        self.ui_queue.put(("status", "收到 F11，尝试强制停止自动化..."))
+        self.root.after(0, self.force_stop_automation)
 
     def _start_from_ui(self) -> None:
         if self.worker_thread and self.worker_thread.is_alive():
@@ -677,9 +688,23 @@ class ChaosHelperApp:
         )
 
     def stop_automation(self, update_status: bool = True) -> None:
+        is_running = bool(self.worker_thread and self.worker_thread.is_alive())
         self.automation_stop_event.set()
         if update_status:
-            self._set_status("自动化已停止。")
+            if is_running:
+                self._set_status("已发送手动停止指令（F10），当前步骤结束后停止。")
+            else:
+                self._set_status("当前没有运行中的自动化。")
+
+    def force_stop_automation(self, update_status: bool = True) -> None:
+        is_running = bool(self.worker_thread and self.worker_thread.is_alive())
+        self.automation_stop_event.set()
+        self._best_effort_release_inputs()
+        if update_status:
+            if is_running:
+                self._set_status("已触发强制停止（F11），并尝试释放输入按键。")
+            else:
+                self._set_status("当前没有运行中的自动化。")
 
     def _automation_loop(self) -> None:
         item_name = self.run_item_name
@@ -688,15 +713,18 @@ class ChaosHelperApp:
 
         while not self.automation_stop_event.is_set():
             self._do_shift_click()
-            time.sleep(self.runtime.click_delay)
+            if self._wait_or_stop(self.runtime.click_delay):
+                return
 
             self._do_copy_item_text()
-            time.sleep(self.runtime.copy_delay)
+            if self._wait_or_stop(self.runtime.copy_delay):
+                return
 
             clipboard_text = pyperclip.paste()
             if not clipboard_text.strip():
                 self._enqueue_status("剪贴板为空，继续重试...")
-                time.sleep(self.runtime.loop_interval)
+                if self._wait_or_stop(self.runtime.loop_interval):
+                    return
                 continue
 
             detected_item = detect_item_name_from_clipboard(clipboard_text, self.item_names)
@@ -704,7 +732,8 @@ class ChaosHelperApp:
                 self._enqueue_status(
                     f"检测到当前物品为 {detected_item}，与目标珠宝 {item_name} 不一致，已跳过本轮。"
                 )
-                time.sleep(self.runtime.loop_interval)
+                if self._wait_or_stop(self.runtime.loop_interval):
+                    return
                 continue
 
             result = match_clipboard_mods(clipboard_text, templates)
@@ -722,7 +751,8 @@ class ChaosHelperApp:
             self._enqueue_status(
                 f"未命中命令；当前识别 {len(result.matched_template_ids)} 条词缀，继续洗词缀..."
             )
-            time.sleep(self.runtime.loop_interval)
+            if self._wait_or_stop(self.runtime.loop_interval):
+                return
 
     def _do_shift_click(self) -> None:
         with self.input_lock:
@@ -737,8 +767,25 @@ class ChaosHelperApp:
             self.keyboard.release("c")
             self.keyboard.release(Key.ctrl)
 
+    def _wait_or_stop(self, delay_seconds: float) -> bool:
+        if delay_seconds <= 0:
+            return self.automation_stop_event.is_set()
+        return self.automation_stop_event.wait(delay_seconds)
+
+    def _best_effort_release_inputs(self) -> None:
+        if not self.input_lock.acquire(timeout=0.03):
+            return
+        try:
+            for key in (Key.shift, Key.ctrl, "c"):
+                try:
+                    self.keyboard.release(key)
+                except Exception:
+                    pass
+        finally:
+            self.input_lock.release()
+
     def _on_close(self) -> None:
-        self.stop_automation(update_status=False)
+        self.force_stop_automation(update_status=False)
         if self.hotkey_listener:
             self.hotkey_listener.stop()
         self.root.destroy()

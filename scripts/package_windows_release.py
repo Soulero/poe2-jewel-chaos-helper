@@ -54,7 +54,7 @@ def write_release_readme(target: Path, exe_name: str) -> None:
         "Usage:\n"
         "1. Keep all files in the same folder.\n"
         f"2. Double-click {exe_name} to start the GUI.\n"
-        "3. Press F9 to start automation, F10 to stop.\n"
+        "3. Press F9 to start automation, F10 for manual stop, F11 for force stop.\n"
     )
     target.write_text(text, encoding="utf-8")
 
